@@ -1073,6 +1073,12 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         if (bytesWritten == -1) {
             [self _failWithError:[NSError errorWithDomain:@"org.lolrus.SocketRocket" code:2145 userInfo:[NSDictionary dictionaryWithObject:@"Error writing to stream" forKey:NSLocalizedDescriptionKey]]];
              return;
+        } else {
+            [self _performDelegateBlock:^{
+                if([self.delegate respondsToSelector:@selector(webSocket:didEndWritingData:)]) {
+                    [self.delegate webSocket:self didEndWritingData:bytesWritten];
+                }
+            }];
         }
         
         _outputBufferOffset += bytesWritten;
