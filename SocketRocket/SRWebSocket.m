@@ -711,20 +711,34 @@ static __strong NSData *CRLFCRLF;
             return;
     }
     [_outputBuffer appendData:data];
-    [self _pumpWriting];
+    data = nil;
+
+    __weak SRWebSocket *wSelf = self;
+    do {
+
+        @autoreleasepool {
+         
+            [wSelf _pumpWriting];
+            
+        }
+    
+    } while (_outputBuffer.length > (32 * 1024));
+    
 }
+
+
 - (void)send:(id)data;
 {
-    NSAssert(self.readyState != SR_CONNECTING, @"Invalid State: Cannot call send: until connection is open");
+    NSAssert(self.readyState != SR_CONNECTING, @"Invalid State: Cannot call send: until connection is open");    
+    id aData = [data copy];
     // TODO: maybe not copy this for performance
-    data = [data copy];
-    dispatch_async(_workQueue, ^{
-        if ([data isKindOfClass:[NSString class]]) {
-            [self _sendFrameWithOpcode:SROpCodeTextFrame data:[(NSString *)data dataUsingEncoding:NSUTF8StringEncoding]];
-        } else if ([data isKindOfClass:[NSData class]]) {
-            [self _sendFrameWithOpcode:SROpCodeBinaryFrame data:data];
-        } else if (data == nil) {
-            [self _sendFrameWithOpcode:SROpCodeTextFrame data:data];
+    dispatch_sync(_workQueue, ^{
+        if ([aData isKindOfClass:[NSString class]]) {
+            [self _sendFrameWithOpcode:SROpCodeTextFrame data:[(NSString *)aData dataUsingEncoding:NSUTF8StringEncoding]];
+        } else if ([aData isKindOfClass:[NSData class]]) {
+            [self _sendFrameWithOpcode:SROpCodeBinaryFrame data:aData];
+        } else if (aData == nil) {
+            [self _sendFrameWithOpcode:SROpCodeTextFrame data:aData];
         } else {
             assert(NO);
         }
@@ -1063,6 +1077,7 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
     });
 }
 
+
 - (void)_pumpWriting;
 {
     [self assertOnWorkQueue];
@@ -1074,17 +1089,20 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
             [self _failWithError:[NSError errorWithDomain:@"org.lolrus.SocketRocket" code:2145 userInfo:[NSDictionary dictionaryWithObject:@"Error writing to stream" forKey:NSLocalizedDescriptionKey]]];
              return;
         } else {
+            __weak SRWebSocket *wSelf = self;
             [self _performDelegateBlock:^{
-                if([self.delegate respondsToSelector:@selector(webSocket:didEndWritingData:)]) {
-                    [self.delegate webSocket:self didEndWritingData:bytesWritten];
+                if([wSelf.delegate respondsToSelector:@selector(webSocket:didEndWritingData:)]) {
+                    [wSelf.delegate webSocket:wSelf didEndWritingData:bytesWritten];
                 }
             }];
         }
         
         _outputBufferOffset += bytesWritten;
         
-        if (_outputBufferOffset > 4096 && _outputBufferOffset > (_outputBuffer.length >> 1)) {
-            _outputBuffer = [[NSMutableData alloc] initWithBytes:(char *)_outputBuffer.bytes + _outputBufferOffset length:_outputBuffer.length - _outputBufferOffset];
+        if (_outputBufferOffset > 4096 /*&& _outputBufferOffset > (_outputBuffer.length >> 1)*/) {
+            NSMutableData *bufferData = [[NSMutableData alloc] initWithBytes:(char *)_outputBuffer.bytes + _outputBufferOffset length:_outputBuffer.length - _outputBufferOffset];
+            _outputBuffer = nil;
+            _outputBuffer = bufferData;
             _outputBufferOffset = 0;
         }
     }
@@ -1371,6 +1389,7 @@ static const size_t SRFrameHeaderOverhead = 32;
     assert(frame_buffer_size <= [frame length]);
     frame.length = frame_buffer_size;
     
+    data = nil;
     [self _writeData:frame];
 }
 
