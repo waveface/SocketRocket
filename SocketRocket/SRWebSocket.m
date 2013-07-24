@@ -204,7 +204,7 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
 
 - (void)_pumpScanner;
 
-- (void)_pumpWriting;
+- (NSInteger)_pumpWriting;
 
 - (void)_addConsumerWithScanner:(stream_scanner)consumer callback:(data_callback)callback;
 - (void)_addConsumerWithDataLength:(size_t)dataLength callback:(data_callback)callback readToCurrentFrame:(BOOL)readToCurrentFrame unmaskBytes:(BOOL)unmaskBytes;
@@ -224,6 +224,8 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
 
 @property (nonatomic) NSOperationQueue *delegateOperationQueue;
 @property (nonatomic) dispatch_queue_t delegateDispatchQueue;
+
+@property (nonatomic) NSTimer *outputTimeout;
 
 @end
 
@@ -714,12 +716,27 @@ static __strong NSData *CRLFCRLF;
     data = nil;
 
     __weak SRWebSocket *wSelf = self;
+    NSInteger bytesWritten = 0;
+    NSTimeInterval stopWrittingTime = 0;
+    
     do {
 
         @autoreleasepool {
          
-            [wSelf _pumpWriting];
+            bytesWritten = [wSelf _pumpWriting];
             
+        }
+        
+        if (bytesWritten <= 0 && stopWrittingTime == 0) {
+            stopWrittingTime = [[NSDate date] timeIntervalSince1970];
+        }
+        if (bytesWritten > 0) {
+            stopWrittingTime = 0;
+        }
+        
+        NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
+        if (stopWrittingTime != 0 && (currentTime - stopWrittingTime) > 3) {
+            break;
         }
     
     } while (_outputBuffer.length > (32 * 1024));
@@ -1078,16 +1095,17 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
 }
 
 
-- (void)_pumpWriting;
+- (NSInteger)_pumpWriting;
 {
     [self assertOnWorkQueue];
     
     NSUInteger dataLength = _outputBuffer.length;
+    NSInteger bytesWritten = 0;
     if (dataLength - _outputBufferOffset > 0 && _outputStream.hasSpaceAvailable) {
-        NSInteger bytesWritten = [_outputStream write:_outputBuffer.bytes + _outputBufferOffset maxLength:dataLength - _outputBufferOffset];
+        bytesWritten = [_outputStream write:_outputBuffer.bytes + _outputBufferOffset maxLength:dataLength - _outputBufferOffset];
         if (bytesWritten == -1) {
             [self _failWithError:[NSError errorWithDomain:@"org.lolrus.SocketRocket" code:2145 userInfo:[NSDictionary dictionaryWithObject:@"Error writing to stream" forKey:NSLocalizedDescriptionKey]]];
-             return;
+             return bytesWritten;
         } else {
             __weak SRWebSocket *wSelf = self;
             [self _performDelegateBlock:^{
@@ -1117,6 +1135,11 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         [_outputStream close];
         [_inputStream close];
         
+        if (self.outputTimeout) {
+            [self.outputTimeout invalidate];
+            self.outputTimeout = nil;
+        }
+        
         
         for (NSArray *runLoop in [_scheduledRunloops copy]) {
             [self unscheduleFromRunLoop:[runLoop objectAtIndex:0] forMode:[runLoop objectAtIndex:1]];
@@ -1131,7 +1154,15 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         }
         
         _selfRetain = nil;
+        return 0;
     }
+    return bytesWritten;
+}
+
+- (void) handleOutputStreamTimeout {
+    
+    [self _failWithError:[NSError errorWithDomain:@"org.lolrus.SocketRocket" code:23556 userInfo:[NSDictionary dictionaryWithObject:@"Output request timeout" forKey:NSLocalizedDescriptionKey]]];
+    
 }
 
 - (void)_addConsumerWithScanner:(stream_scanner)consumer callback:(data_callback)callback;
@@ -1426,7 +1457,7 @@ static const size_t SRFrameHeaderOverhead = 32;
             }
         }
     }
-
+    
     dispatch_async(_workQueue, ^{
         switch (eventCode) {
             case NSStreamEventOpenCompleted: {
